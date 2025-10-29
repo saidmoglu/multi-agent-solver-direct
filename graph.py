@@ -139,7 +139,7 @@ def verifier_node(state: SolverState) -> SolverState:
     if state.is_max_steps_reached():
         state.logs.append("Maximum steps reached without solving the task.")
         state.progress_callback(
-            state.step_index, state.config.max_steps, "failed: max steps reached", False
+            state.step_index, state.config.max_steps, "failed_max_steps", False
         )
         return state.clone_with_updates(
             graph_status="failed_max_steps",

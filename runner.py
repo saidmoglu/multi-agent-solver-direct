@@ -10,6 +10,8 @@ from rich.progress import (
 )
 from datetime import datetime as dt
 
+from concurrent.futures import ThreadPoolExecutor
+
 import asyncio
 import base64
 import io
@@ -37,13 +39,13 @@ from state import SampleGrids, SolverConfig, SolverState, TokenUsage
 # Configuration (adjust as needed)
 # -------------------------------
 CONFIG = SolverConfig(
-    task_file="data/arc-prize-2025/arc-agi_training_challenges.json",
+    task_file="data/arc-prize-2025/arc-agi_evaluation_challenges.json",
     task_ids=None,
-    num_of_tasks=40,
+    num_of_tasks=None,
     offset_tasks=0,
-    reasoning_level="low",
-    max_steps=5,
-    max_concurrency=20,
+    reasoning_level="medium",
+    max_steps=10,
+    max_concurrency=120,
     use_images=True,
     tracing=False,
 )
@@ -91,12 +93,14 @@ async def _run_single_task(
     initial_state: SolverState,
     outputs_dir: Path,
     solutions_data: dict[str, Any] | None,
+    executor: ThreadPoolExecutor,
     semaphore: asyncio.Semaphore,
     progress_bar: Progress | None = None,
     progress_task_id: TaskID | None = None,
     overall_progress_task_id: TaskID | None = None,
 ) -> TaskRunResult:
     async with semaphore:
+        loop = asyncio.get_running_loop()
         initial_state.progress_callback(
             initial_state.step_index,
             initial_state.config.max_steps,
@@ -105,7 +109,9 @@ async def _run_single_task(
         )
         initial_state.logs.append(f"[Task {task_id}] ({index}/{total}) Starting task")
         try:
-            final_state_raw = await asyncio.to_thread(app.invoke, initial_state)
+            final_state_raw = await loop.run_in_executor(
+                executor, app.invoke, initial_state
+            )
         except Exception as exc:  # noqa: BLE001
             error_message = f"Task {task_id} failed with runtime error: {exc}\n{traceback.format_exc()}"
             initial_state.logs.append(error_message)
@@ -151,7 +157,6 @@ async def _run_single_task(
         test_correct_count = 0
         test_incorrect_count = 0
         submission_entries: dict[str, list[dict[str, GRID]]] | None = None
-        loop = asyncio.get_running_loop()
         if solutions_data:
             expected_tests = solutions_data.get(task_id)
             if expected_tests is not None:
@@ -163,7 +168,7 @@ async def _run_single_task(
                         partial(
                             progress_bar.update,
                             progress_task_id,
-                            status="completed - test match",
+                            status=f"{final_state.graph_status} - test match",
                             result_emoji="[green]:heavy_check_mark:[/]",
                         )
                     )
@@ -179,7 +184,7 @@ async def _run_single_task(
                         partial(
                             progress_bar.update,
                             progress_task_id,
-                            status="completed - test mismatch",
+                            status=f"{final_state.graph_status} - test mismatch",
                             result_emoji="[red]:x:[/]",
                         )
                     )
@@ -289,7 +294,8 @@ async def _async_main() -> None:
     test_correct_count = 0
     test_incorrect_count = 0
 
-    semaphore = asyncio.Semaphore(_calculate_max_concurrency(len(task_ids)))
+    max_concurrency = _calculate_max_concurrency(len(task_ids))
+    semaphore = asyncio.Semaphore(max_concurrency)
     task_coroutines: list[asyncio.Task[TaskRunResult]] = []
     task_id_to_progress: dict[str, TaskID] = {}
 
@@ -337,44 +343,46 @@ async def _async_main() -> None:
 
         return _cb
 
-    with progress:
-        for index, task_id in enumerate(task_ids, start=1):
-            progress_task_id = progress.add_task(
-                description="",
-                total=CONFIG.max_steps,
-                step=0,
-                task_id=task_id,
-                status="not started yet",
-                result_emoji="",
-                visible=False,
-                progress_type="Step ",
-            )
-            task_id_to_progress[task_id] = progress_task_id
+    with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+        with progress:
+            for index, task_id in enumerate(task_ids, start=1):
+                progress_task_id = progress.add_task(
+                    description="",
+                    total=CONFIG.max_steps,
+                    step=0,
+                    task_id=task_id,
+                    status="not started yet",
+                    result_emoji="",
+                    visible=False,
+                    progress_type="Step ",
+                )
+                task_id_to_progress[task_id] = progress_task_id
 
-            progress_callback = make_progress_callback(task_id, progress_task_id)
-            samples = _samples_from_task(tasks_data[task_id])
-            initial_state = initialise_state(CONFIG, task_id, samples)
-            initial_state.progress_callback = progress_callback
-            task_coroutines.append(
-                asyncio.create_task(
-                    _run_single_task(
-                        index=index,
-                        total=len(task_ids),
-                        task_id=task_id,
-                        app=app,
-                        run_id=run_id,
-                        samples=samples,
-                        initial_state=initial_state,
-                        outputs_dir=outputs_dir,
-                        solutions_data=solutions_data,
-                        semaphore=semaphore,
-                        progress_bar=progress,
-                        progress_task_id=progress_task_id,
-                        overall_progress_task_id=overall_progress_task_id,
+                progress_callback = make_progress_callback(task_id, progress_task_id)
+                samples = _samples_from_task(tasks_data[task_id])
+                initial_state = initialise_state(CONFIG, task_id, samples)
+                initial_state.progress_callback = progress_callback
+                task_coroutines.append(
+                    asyncio.create_task(
+                        _run_single_task(
+                            index=index,
+                            total=len(task_ids),
+                            task_id=task_id,
+                            app=app,
+                            run_id=run_id,
+                            samples=samples,
+                            initial_state=initial_state,
+                            outputs_dir=outputs_dir,
+                            solutions_data=solutions_data,
+                            executor=executor,
+                            semaphore=semaphore,
+                            progress_bar=progress,
+                            progress_task_id=progress_task_id,
+                            overall_progress_task_id=overall_progress_task_id,
+                        )
                     )
                 )
-            )
-        task_results = await asyncio.gather(*task_coroutines, return_exceptions=True)
+            task_results = await asyncio.gather(*task_coroutines, return_exceptions=True)
 
     for result in task_results:
         if isinstance(result, Exception):
