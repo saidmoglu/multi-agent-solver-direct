@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable, Sequence
 
 from langgraph.graph import END, StateGraph
 
+
 from agents import GeneratorAgent, InstructionAgent
-from representation_utils import generate_grid_diff
+from representation_utils import GRID, generate_grid_diff
 from state import (
     SampleGrids,
     SolverState,
     create_initial_state,
 )
+import state
 
 
-def build_solver_graph(
+def build_solver_graph_old(
     instruction_agent: InstructionAgent,
     generator_agent: GeneratorAgent,
 ) -> StateGraph:
@@ -39,15 +41,64 @@ def build_solver_graph(
     graph.set_entry_point("instruction")
     graph.add_edge("instruction", "generator")
     graph.add_edge("generator", "verifier")
+
+    def route_from_verifier_node(state: SolverState) -> str:
+        if state.graph_status in {"completed", "failed_max_steps", "failed_error"}:
+            return END
+        return "instruction"
+
     graph.add_conditional_edges(
         "verifier",
-        _verifier_router,
-        {
-            "loop": "instruction",
-            "complete": END,
-            "failed": END,
-        },
+        route_from_verifier_node,
     )
+
+    return graph
+
+
+def build_solver_graph(
+    instruction_agent: InstructionAgent,
+    generator_agent: GeneratorAgent,
+) -> StateGraph:
+    graph = StateGraph(SolverState)
+
+    graph.add_node("instruction", _make_instruction_node(instruction_agent))
+    graph.add_node("generator", _make_generator_node(generator_agent))
+    graph.add_node("verifier", verifier_node)
+    graph.set_entry_point("instruction")
+
+    def route_from_instruction_node(state: SolverState) -> str:
+        if state.status_from_instr_node == "complete":
+            return END
+        return "generator"
+
+    graph.add_conditional_edges(
+        "instruction",
+        route_from_instruction_node,
+    )
+
+    def route_from_generator_node(state: SolverState) -> str:
+        if state.is_max_steps_reached():
+            state.logs.append("Maximum steps reached without solving the task.")
+            state.progress_callback(
+                state.step_index, state.config.max_steps, "reached_max_steps", False
+            )
+            return END
+        if state.graph_status == "running train":
+            state.progress_callback(
+                state.step_index, state.config.max_steps, state.graph_status, None
+            )
+            return "verifier"
+        state.progress_callback(
+            state.step_index, state.config.max_steps, state.graph_status, None
+        )
+        return "instruction"
+
+    graph.add_conditional_edges(
+        "generator",
+        route_from_generator_node,
+    )
+
+    graph.add_edge("verifier", "instruction")
 
     return graph
 
@@ -64,18 +115,19 @@ def _make_instruction_node(
         result = agent(state)
         state.attach_token_usage(result.usage)
         state.logs.append(
-            f"\nInstruction node output:\nInstruction: {result.instruction}\nRationale: {result.rationale}\nConfidence: {result.confidence}"
+            f"\nInstruction node output:\nInstruction: {result.instruction}"
         )
         return state.clone_with_updates(
             pending_instruction=result.instruction,
-            pending_instruction_rationale=result.rationale,
-            pending_instruction_confidence=result.confidence,
+            status_from_instr_node=result.status,
+            # pending_instruction_rationale=result.rationale,
+            # pending_instruction_confidence=result.confidence,
         )
 
     return run
 
 
-def _summarise_diffs(state, samples: SampleGrids) -> str:
+def _summarise_diffs(state: SolverState, samples: SampleGrids) -> str:
     lines: list[str] = []
     for idx, expected in enumerate(samples.train_outputs):
         actual = state.train_partial_outputs[idx]
@@ -130,33 +182,11 @@ def verifier_node(state: SolverState) -> SolverState:
 
     if all_match:
         state.logs.append("All train outputs match expected outputs.")
-        state.progress_callback(state.step_index, state.step_index, "completed", True)
         return state.clone_with_updates(
-            graph_status="completed",
+            graph_status="running test",
             last_verifier_passed=True,
         )
-
-    if state.is_max_steps_reached():
-        state.logs.append("Maximum steps reached without solving the task.")
-        state.progress_callback(
-            state.step_index, state.config.max_steps, "failed_max_steps", False
-        )
-        return state.clone_with_updates(
-            graph_status="failed_max_steps",
-            last_verifier_passed=False,
-        )
     state.logs.append("Train outputs do not match expected outputs; continuing.")
-    state.progress_callback(
-        state.step_index, state.config.max_steps, "in progress", None
-    )
     return state.clone_with_updates(
         last_verifier_passed=False,
     )
-
-
-def _verifier_router(state: SolverState) -> str:
-    if state.graph_status == "completed":
-        return "complete"
-    if state.graph_status in {"failed_max_steps", "failed_error"}:
-        return "failed"
-    return "loop"

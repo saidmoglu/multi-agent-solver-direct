@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import itertools
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -106,20 +107,21 @@ class SolverState:
     samples: SampleGrids
     step_index: int = 0
     instructions: list[str] = field(default_factory=list)
-    train_partial_outputs: list[GRID | None] = field(default_factory=list)
-    test_partial_outputs: list[GRID | None] = field(default_factory=list)
+    train_partial_outputs: list[GRID] = field(default_factory=list)
+    test_partial_outputs: list[GRID] = field(default_factory=list)
     generator_status_and_findings: str | None = None
     pending_instruction: str | None = None
     pending_instruction_rationale: str | None = None
     pending_instruction_confidence: ConfidenceLevel | None = None
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     graph_status: Literal[
-        "running", "completed", "failed_max_steps", "failed_error"
-    ] = "running"
+        "running train", "running test", "completed", "failed_max_steps", "failed_error"
+    ] = "running train"
     last_verifier_passed: bool = False
     created_at: datetime = field(default_factory=datetime.utcnow)
     progress_callback: Callable | None = None
     logs: list[str] = field(default_factory=list)
+    status_from_instr_node: str | None = None
 
     def clone_with_updates(
         self,
@@ -134,6 +136,7 @@ class SolverState:
         pending_instruction: str | None = None,
         pending_instruction_rationale: str | None = None,
         pending_instruction_confidence: ConfidenceLevel | None = None,
+        status_from_instr_node: str | None = None,
     ) -> SolverState:
         state = replace(self)
         if instructions is not None:
@@ -156,6 +159,8 @@ class SolverState:
             state.pending_instruction_rationale = pending_instruction_rationale
         if pending_instruction_confidence is not None:
             state.pending_instruction_confidence = pending_instruction_confidence
+        if status_from_instr_node is not None:
+            state.status_from_instr_node = status_from_instr_node
         return state
 
     def advance_step(
@@ -178,8 +183,8 @@ class SolverState:
             generator_status_and_findings=status_and_findings,
             step_index=self.step_index + 1,
             pending_instruction=None,
-            pending_instruction_rationale=None,
-            pending_instruction_confidence=None,
+            # pending_instruction_rationale=None,
+            # pending_instruction_confidence=None,
         )
 
     def is_max_steps_reached(self) -> bool:
@@ -194,8 +199,8 @@ def create_initial_state(
     task_id: str,
     samples: SampleGrids,
 ) -> SolverState:
-    train_partials: list[GRID | None] = [None] * samples.train_count()
-    test_partials: list[GRID | None] = [None] * samples.test_count()
+    train_partials: list[GRID] = [[[1]]] * samples.train_count()
+    test_partials: list[GRID] = [[[1]]] * samples.test_count()
     return SolverState(
         config=config,
         task_id=task_id,
@@ -210,9 +215,7 @@ def merge_partial_outputs(
     updates: Sequence[GRID | None],
 ) -> list[GRID | None]:
     if len(existing) != len(updates):
-        raise ValueError(
-            f"Partial output length mismatch: {len(existing)} vs {len(updates)}"
-        )
+        updates = copy.deepcopy(existing)
     merged: list[GRID | None] = []
     for original, newer in zip(existing, updates, strict=True):
         merged.append(newer if newer is not None else original)

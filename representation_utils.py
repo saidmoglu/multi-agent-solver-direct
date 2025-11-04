@@ -54,66 +54,6 @@ def grid_to_text(
     )
 
 
-def text_to_grid(
-    text: str,
-    *,
-    cell_separator: str | None = " ",
-    row_separator: str | None = "\n",
-) -> GRID:
-    """Parse a textual grid representation back into a GRID structure.
-
-    Args:
-        text: String containing numeric rows, typically produced by
-            [`grid_to_text`](representation_utils.py:27).
-        cell_separator: Delimiter between cells inside a row. When ``None``,
-            any contiguous whitespace is treated as a separator.
-        row_separator: Delimiter between rows. When ``None``, line breaks are used.
-
-    Returns:
-        Reconstructed grid as ``list[list[int]]``.
-
-    Raises:
-        ValueError: If the text is empty, contains non-integer tokens, or forms a ragged grid.
-    """
-    stripped = text.strip()
-    if not stripped:
-        raise ValueError("Cannot parse grid from empty text.")
-
-    if row_separator is None:
-        raw_rows = stripped.splitlines()
-    else:
-        raw_rows = stripped.split(row_separator)
-
-    rows: list[list[int]] = []
-    for row_index, raw_row in enumerate(raw_rows):
-        row_text = raw_row.strip()
-        if not row_text:
-            continue
-
-        if cell_separator is None:
-            cell_tokens = row_text.split()
-        else:
-            cell_tokens = [tok for tok in row_text.split(cell_separator) if tok]
-
-        if not cell_tokens:
-            raise ValueError(f"Row {row_index} is empty after splitting.")
-
-        try:
-            row_values = [int(token) for token in cell_tokens]
-        except ValueError as exc:
-            raise ValueError(
-                f"Row {row_index} contains a non-integer token: {cell_tokens}"
-            ) from exc
-
-        rows.append(row_values)
-
-    shape = _validate_rectangular_grid(rows)
-    if shape.rows == 0 or shape.cols == 0:
-        raise ValueError("Parsed grid has no cells.")
-
-    return rows
-
-
 def generate_grid_diff(expected_grid: GRID, actual_grid: GRID) -> str:
     """Create the ASCII diff notation used in [`generate_grid_diff()`](src/run.py:211).
 
@@ -130,8 +70,11 @@ def generate_grid_diff(expected_grid: GRID, actual_grid: GRID) -> str:
     Raises:
         ValueError: If either grid is empty.
     """
-    expected_shape = _validate_rectangular_grid(expected_grid)
-    actual_shape = _validate_rectangular_grid(actual_grid)
+    try:
+        expected_shape = _validate_rectangular_grid(expected_grid)
+        actual_shape = _validate_rectangular_grid(actual_grid)
+    except ValueError as e:
+        return f"Diff generation error"
 
     if expected_shape != actual_shape:
         return (
@@ -253,7 +196,7 @@ def grid_to_base64_png(
 
 
 def _validate_rectangular_grid(grid: GRID) -> GridShape:
-    if not grid or not grid[0]:
+    if not grid or len(grid) == 0 or len(grid[0]) == 0:
         raise ValueError("Grid must be non-empty and rectangular.")
 
     row_length = len(grid[0])

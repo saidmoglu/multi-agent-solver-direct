@@ -41,13 +41,13 @@ from state import SampleGrids, SolverConfig, SolverState, TokenUsage
 CONFIG = SolverConfig(
     task_file="data/arc-prize-2025/arc-agi_evaluation_challenges.json",
     task_ids=None,
-    num_of_tasks=None,
+    num_of_tasks=120,
     offset_tasks=0,
     reasoning_level="medium",
-    max_steps=10,
+    max_steps=20,
     max_concurrency=120,
     use_images=True,
-    tracing=False,
+    tracing=True,
 )
 
 
@@ -104,7 +104,7 @@ async def _run_single_task(
         initial_state.progress_callback(
             initial_state.step_index,
             initial_state.config.max_steps,
-            "in progress",
+            "running train",
             None,
         )
         initial_state.logs.append(f"[Task {task_id}] ({index}/{total}) Starting task")
@@ -114,7 +114,16 @@ async def _run_single_task(
             )
         except Exception as exc:  # noqa: BLE001
             error_message = f"Task {task_id} failed with runtime error: {exc}\n{traceback.format_exc()}"
+            print(error_message)
             initial_state.logs.append(error_message)
+            loop.call_soon_threadsafe(
+                partial(
+                    progress_bar.update,
+                    progress_task_id,
+                    status="execution error",
+                    result_emoji="[red]:x:[/]",
+                )
+            )
             return TaskRunResult(
                 task_id=task_id,
                 outcome=None,
@@ -133,7 +142,7 @@ async def _run_single_task(
             else SolverState(**final_state_raw)
         )
         usage_snapshot = _usage_snapshot(final_state.token_usage)
-        train_solved = final_state.graph_status == "completed"
+        train_solved = final_state.graph_status == "running test"
         solved_count = 1 if train_solved else 0
         failed_count = 0 if train_solved else 1
 
@@ -382,7 +391,9 @@ async def _async_main() -> None:
                         )
                     )
                 )
-            task_results = await asyncio.gather(*task_coroutines, return_exceptions=True)
+            task_results = await asyncio.gather(
+                *task_coroutines, return_exceptions=True
+            )
 
     for result in task_results:
         if isinstance(result, Exception):
